@@ -82,12 +82,14 @@ if [[ "$1" == "--uninstall" ]]; then
     systemctl --user daemon-reload 2>/dev/null || true
     info "Removed systemd user relay service."
 
-    # 2. Remove modprobe & modules-load configs
+    # 2. Remove modprobe & modules-load configs & udev rules
     sudo rm -f /etc/modprobe.d/v4l2loopback.conf
     sudo rm -f /etc/modprobe.d/v4l2-relayd.conf
     sudo rm -f /etc/modprobe.d/98-v4l2loopback.conf
     sudo rm -f /etc/modules-load.d/v4l2loopback.conf
-    info "Removed modprobe and modules-load configurations."
+    sudo rm -f /etc/udev/rules.d/60-libcamera-ipu6.rules
+    sudo udevadm control --reload-rules 2>/dev/null || true
+    info "Removed modprobe, modules-load, and udev configurations."
 
     # 3. Unload kernel module
     sudo modprobe -r v4l2loopback 2>/dev/null || true
@@ -117,6 +119,7 @@ fi
 # ------------------------------------------------------------------------------
 info "Checking required packages..."
 REQUIRED_PKGS=(
+    v4l2-relayd
     v4l2loopback
     akmod-v4l2loopback
     kmodtool
@@ -216,7 +219,25 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 5: Detect PipeWire Camera Target Object
+# Step 5: Configure Permissions and Udev Rules for Boot Persistence
+# ------------------------------------------------------------------------------
+info "Configuring device permissions for media and video subsystems..."
+# Ensure user is in video and render groups so background session services have access at boot
+CURRENT_USER="${SUDO_USER:-$USER}"
+sudo usermod -aG video,render "$CURRENT_USER"
+
+# Install udev rule to grant group access and uaccess tags
+sudo tee /etc/udev/rules.d/60-libcamera-ipu6.rules > /dev/null << "UDEVRULE"
+KERNEL=="media[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess"
+KERNEL=="video[0-9]*", GROUP="video", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="intel-ipu6", GROUP="video", MODE="0660", TAG+="uaccess"
+UDEVRULE
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+success "Device permissions and udev rules configured."
+
+# ------------------------------------------------------------------------------
+# Step 6: Detect PipeWire Camera Target Object
 # ------------------------------------------------------------------------------
 info "Detecting internal camera node in PipeWire..."
 TARGET_NODE=$(python3 -c "
@@ -239,20 +260,20 @@ fi
 info "Using PipeWire target camera node: $TARGET_NODE"
 
 # ------------------------------------------------------------------------------
-# Step 6: Create and Enable Persistent User Relay Service
+# Step 7: Create and Enable On-Demand User Relay Service
 # ------------------------------------------------------------------------------
-info "Configuring systemd user service for camera relay..."
+info "Configuring systemd user service for on-demand camera relay..."
 mkdir -p "$HOME/.config/systemd/user"
 
 cat << SERVICE_EOF > "$HOME/.config/systemd/user/v4l2-relayd.service"
 [Unit]
-Description=PipeWire to V4L2loopback Camera Relay for Discord
+Description=PipeWire to V4L2loopback On-Demand Camera Relay for Discord
 After=pipewire.service wireplumber.service
-Requires=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/gst-launch-1.0 -q pipewiresrc target-object=${TARGET_NODE} ! videoconvert ! video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1 ! v4l2sink device=/dev/video32
+ExecStart=/usr/bin/v4l2-relayd -s "videotestsrc num-buffers=15 ! video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1 ! videoconvert" -i "pipewiresrc target-object=${TARGET_NODE} ! videoconvert" -o "appsrc name=appsrc caps=video/x-raw,format=YUY2,width=1280,height=720,framerate=30/1 ! videoconvert ! v4l2sink name=v4l2sink device=/dev/video32"
 Restart=always
 RestartSec=2
 
@@ -265,7 +286,7 @@ systemctl --user enable --now v4l2-relayd.service
 
 sleep 2
 if systemctl --user is-active --quiet v4l2-relayd.service; then
-    success "Camera relay service is active and streaming."
+    success "On-demand camera relay service is active and waiting for camera requests."
 else
     warn "Relay service started but might need a desktop session reload."
 fi
