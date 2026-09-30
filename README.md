@@ -78,7 +78,8 @@ Once booted back into Fedora:
 2. Rebuilds and cryptographically signs `v4l2loopback` with your enrolled MOK key using `akmods --rebuild`.
 3. Creates `/etc/modprobe.d/v4l2loopback.conf` with `exclusive_caps=1` and `card_label="Built-in Front Camera"`.
 4. Creates `/etc/modules-load.d/v4l2loopback.conf` so `/dev/video32` loads on every boot.
-5. Configures a persistent `systemd` user service (`~/.config/systemd/user/v4l2-relayd.service`) that automatically streams PipeWire's front camera into `/dev/video32` at 30 FPS.
+5. Configures device permissions (adds user to `video` and `render` groups) and installs `/etc/udev/rules.d/60-libcamera-ipu6.rules` so WirePlumber can access the camera media nodes at boot time without permission errors.
+6. Configures an **on-demand** `systemd` user service (`~/.config/systemd/user/v4l2-relayd.service`) using `v4l2-relayd` with splash pre-buffering. **The camera sensor and privacy LED remain completely OFF** until Discord or another application actively requests video, and turn OFF immediately when done.
 
 ---
 
